@@ -48,7 +48,7 @@
 입력:
 
 - `components`
-- `use_demo_advisories`
+- `osv_lookup_enabled`
 
 출력:
 

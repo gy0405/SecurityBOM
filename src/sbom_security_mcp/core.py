@@ -5,6 +5,8 @@ from __future__ import annotations
 import csv
 import json
 import re
+import urllib.error
+import urllib.request
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
@@ -19,44 +21,19 @@ SEVERITY_SCORE = {
 }
 
 
-DEMO_ADVISORIES = [
-    {
-        "ecosystem": "pypi",
-        "name": "django",
-        "affected_below": "3.2.25",
-        "id": "CVE-2024-27351",
-        "severity": "high",
-        "summary": "Potential file upload validation bypass in older Django releases.",
-        "fix": "Upgrade Django to 3.2.25, 4.2.11, 5.0.3, or later.",
-    },
-    {
-        "ecosystem": "npm",
-        "name": "lodash",
-        "affected_below": "4.17.21",
-        "id": "CVE-2021-23337",
-        "severity": "high",
-        "summary": "Command injection risk in lodash template handling.",
-        "fix": "Upgrade lodash to 4.17.21 or later.",
-    },
-    {
-        "ecosystem": "npm",
-        "name": "minimist",
-        "affected_below": "1.2.6",
-        "id": "CVE-2021-44906",
-        "severity": "critical",
-        "summary": "Prototype pollution in minimist.",
-        "fix": "Upgrade minimist to 1.2.6 or later.",
-    },
-    {
-        "ecosystem": "maven",
-        "name": "org.apache.logging.log4j:log4j-core",
-        "affected_below": "2.17.1",
-        "id": "CVE-2021-44832",
-        "severity": "medium",
-        "summary": "Remote code execution condition in specific Log4j JDBC appender usage.",
-        "fix": "Upgrade log4j-core to 2.17.1 or later.",
-    },
-]
+OSV_API_URL = "https://api.osv.dev/v1/query"
+OSV_ECOSYSTEMS = {
+    "npm": "npm",
+    "pypi": "PyPI",
+    "maven": "Maven",
+    "golang": "Go",
+    "go": "Go",
+    "crates.io": "crates.io",
+    "cargo": "crates.io",
+    "nuget": "NuGet",
+    "rubygems": "RubyGems",
+    "packagist": "Packagist",
+}
 
 
 RISKY_LICENSES = {
@@ -140,6 +117,15 @@ def version_lt(current: str, required: str) -> bool:
     return left + (0,) * (max_len - len(left)) < right + (0,) * (max_len - len(right))
 
 
+def normalize_severity(severity: str | None) -> str:
+    value = (severity or "unknown").strip().lower()
+    if value in {"critical", "high", "medium", "low"}:
+        return value
+    if value in {"moderate", "important"}:
+        return "medium"
+    return "unknown"
+
+
 def infer_ecosystem(package_url: str, name: str) -> str:
     purl = package_url.lower()
     if purl.startswith("pkg:"):
@@ -215,24 +201,109 @@ def load_components(path: Path) -> list[Component]:
     raise ValueError("Unsupported SBOM format. Use CycloneDX JSON or SPDX JSON.")
 
 
-def match_advisories(component: Component) -> list[Finding]:
-    findings = []
-    component_name = normalize_name(component.name)
-    for advisory in DEMO_ADVISORIES:
-        advisory_name = normalize_name(advisory["name"])
-        ecosystem_matches = component.ecosystem == advisory["ecosystem"] or component.ecosystem == "unknown"
-        name_matches = component_name == advisory_name or component.package_url.lower().endswith(advisory_name)
-        if ecosystem_matches and name_matches and version_lt(component.version, advisory["affected_below"]):
-            findings.append(
-                Finding(
-                    component=component,
-                    category="vulnerability",
-                    severity=advisory["severity"],
-                    title=f"{advisory['id']} affects {component.name}",
-                    detail=advisory["summary"],
-                    recommendation=advisory["fix"],
-                )
+def osv_ecosystem(component: Component) -> str | None:
+    return OSV_ECOSYSTEMS.get(component.ecosystem.lower())
+
+
+def osv_package_name(component: Component) -> str:
+    if component.ecosystem == "maven" and component.package_url:
+        # pkg:maven/group/artifact@version -> group:artifact
+        package = component.package_url.removeprefix("pkg:maven/")
+        package = package.split("@", 1)[0]
+        parts = package.split("/")
+        if len(parts) >= 2:
+            return f"{parts[-2]}:{parts[-1]}"
+    return component.name
+
+
+def osv_severity(vulnerability: dict[str, Any]) -> str:
+    database_severity = vulnerability.get("database_specific", {}).get("severity")
+    if isinstance(database_severity, str) and database_severity:
+        return normalize_severity(database_severity)
+
+    severity_items = vulnerability.get("severity") or []
+    for item in severity_items:
+        score = item.get("score", "")
+        if isinstance(score, str) and score.startswith("CVSS:"):
+            if "AV:N" in score and ("PR:N" in score or "UI:N" in score):
+                return "high"
+    return "unknown"
+
+
+def osv_fixed_versions(vulnerability: dict[str, Any]) -> list[str]:
+    fixes = []
+    for affected in vulnerability.get("affected", []):
+        for range_item in affected.get("ranges", []):
+            for event in range_item.get("events", []):
+                fixed = event.get("fixed")
+                if fixed:
+                    fixes.append(str(fixed))
+    return sorted(set(fixes), key=parse_version)
+
+
+def best_fixed_version(current: str, fixes: list[str]) -> str | None:
+    newer_fixes = [fix for fix in fixes if not version_lt(fix, current)]
+    if newer_fixes:
+        return sorted(newer_fixes, key=parse_version)[0]
+    return fixes[0] if fixes else None
+
+
+def query_osv(component: Component, timeout: int = 10) -> list[Finding]:
+    ecosystem = osv_ecosystem(component)
+    if not ecosystem or component.version == "unknown":
+        return []
+
+    payload = {
+        "package": {
+            "name": osv_package_name(component),
+            "ecosystem": ecosystem,
+        },
+        "version": component.version,
+    }
+    request = urllib.request.Request(
+        OSV_API_URL,
+        data=json.dumps(payload).encode("utf-8"),
+        headers={"Content-Type": "application/json", "User-Agent": "sbom-security-mcp/0.1"},
+        method="POST",
+    )
+
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            data = json.loads(response.read().decode("utf-8"))
+    except (urllib.error.URLError, TimeoutError, json.JSONDecodeError):
+        return [
+            Finding(
+                component=component,
+                category="quality",
+                severity="low",
+                title=f"OSV lookup failed for {component.name}",
+                detail="The vulnerability database lookup could not be completed.",
+                recommendation="Retry with network access or use demo advisory mode for offline testing.",
             )
+        ]
+
+    findings = []
+    for vulnerability in data.get("vulns", []):
+        vuln_id = vulnerability.get("id", "OSV-UNKNOWN")
+        aliases = vulnerability.get("aliases") or []
+        title_id = aliases[0] if aliases else vuln_id
+        fixes = osv_fixed_versions(vulnerability)
+        fixed_version = best_fixed_version(component.version, fixes)
+        recommendation = (
+            f"Upgrade to {fixed_version} or later."
+            if fixed_version
+            else "Review the advisory and upgrade to a non-affected version."
+        )
+        findings.append(
+            Finding(
+                component=component,
+                category="vulnerability",
+                severity=osv_severity(vulnerability),
+                title=f"{title_id} affects {component.name}",
+                detail=vulnerability.get("summary") or vulnerability.get("details", "")[:240],
+                recommendation=recommendation,
+            )
+        )
     return findings
 
 
@@ -307,7 +378,7 @@ def calculate_quality(components: list[Component]) -> dict[str, Any]:
 def analyze_components(components: list[Component]) -> list[Finding]:
     findings = []
     for component in components:
-        findings.extend(match_advisories(component))
+        findings.extend(query_osv(component))
         findings.extend(check_license(component))
         findings.extend(check_quality(component))
     return sorted(findings, key=lambda finding: finding.score, reverse=True)
@@ -335,10 +406,13 @@ def recommendation_for(findings: list[Finding], quality: dict[str, Any]) -> str:
         return "Approve only after license and SBOM metadata review."
     if quality["score"] < 80:
         return "Request a cleaner SBOM before relying on this result."
-    return "Acceptable for release from the current demo rule set."
+    return "Acceptable for release from the current OSV lookup result."
 
 
-def analyze_sbom_file(path: str | Path, label: str | None = None) -> AnalysisResult:
+def analyze_sbom_file(
+    path: str | Path,
+    label: str | None = None,
+) -> AnalysisResult:
     sbom_path = Path(path)
     components = load_components(sbom_path)
     findings = analyze_components(components)
@@ -430,7 +504,7 @@ def render_analysis_markdown(result: AnalysisResult) -> str:
         "",
     ]
     if not result.findings:
-        lines.append("No findings from the current demo rule set.")
+        lines.append("No findings from OSV for the current SBOM components.")
         return "\n".join(lines)
     for index, finding in enumerate(result.findings, start=1):
         component = finding.component
