@@ -9,7 +9,7 @@ description = "SBOM security analysis MCP for security operators."
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
-  "mcp>=1.0",
+  "mcp[cli]>=1.27,<2",
   "pydantic>=2.7",
 ]
 
