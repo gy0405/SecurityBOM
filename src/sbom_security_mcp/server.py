@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 from pathlib import Path
 
@@ -23,7 +24,13 @@ except ImportError:  # pragma: no cover - allows local CLI use before installing
 
 
 if FastMCP:
-    mcp = FastMCP("sbom-security-mcp")
+    mcp = FastMCP(
+        "sbom-security-mcp",
+        host=os.getenv("HOST", "0.0.0.0"),
+        port=int(os.getenv("PORT", "8000")),
+        stateless_http=True,
+        json_response=True,
+    )
 
     @mcp.tool()
     def inspect_sbom(path: str) -> dict:
@@ -80,7 +87,7 @@ def run_cli() -> int:
 
 def main() -> None:
     if FastMCP:
-        mcp.run()
+        mcp.run(transport=os.getenv("MCP_TRANSPORT", "streamable-http"))
         return
     raise SystemExit("mcp is not installed. Use CLI mode with `python -m sbom_security_mcp.server analyze ...`.")
 
