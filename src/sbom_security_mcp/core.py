@@ -278,7 +278,7 @@ def query_osv(component: Component, timeout: int = 10) -> list[Finding]:
                 severity="low",
                 title=f"OSV lookup failed for {component.name}",
                 detail="The vulnerability database lookup could not be completed.",
-                recommendation="Retry with network access or use demo advisory mode for offline testing.",
+                recommendation="Retry with network access or run again when the OSV API is reachable.",
             )
         ]
 

@@ -75,6 +75,18 @@ MCP 서버 실행:
 python -m sbom_security_mcp.server
 ```
 
+Docker 이미지 빌드:
+
+```powershell
+docker build -t sbom-security-mcp .
+```
+
+Docker로 단일 SBOM 분석:
+
+```powershell
+docker run --rm sbom-security-mcp python -m sbom_security_mcp.server analyze examples/sample-cyclonedx.json
+```
+
 ## 데이터 소스
 
 MVP에서는 OSV 취약점 DB를 조회합니다.
@@ -94,6 +106,7 @@ sbom-security-mcp/
   docs/
     tool-design.md
     demo-scenario.md
+  Dockerfile
   examples/
     sample-cyclonedx.json
     sample-cyclonedx-fixed.json
