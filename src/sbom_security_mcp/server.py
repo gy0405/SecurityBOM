@@ -1,4 +1,4 @@
-"""MCP and CLI entry point for sbom-security-mcp."""
+"""MCP and CLI entry point for secuBOM (sbom-security-mcp)."""
 
 from __future__ import annotations
 
@@ -19,30 +19,56 @@ from .core import (
 
 try:
     from mcp.server.fastmcp import FastMCP
+    from mcp.types import ToolAnnotations
 except ImportError:  # pragma: no cover - allows local CLI use before installing mcp.
     FastMCP = None
+    ToolAnnotations = None
 
 
 if FastMCP:
     mcp = FastMCP(
-        "sbom-security-mcp",
+        "secuBOM",
         host=os.getenv("HOST", "0.0.0.0"),
         port=int(os.getenv("PORT", "8000")),
         stateless_http=True,
         json_response=True,
     )
 
-    @mcp.tool()
+    @mcp.tool(
+        annotations=ToolAnnotations(
+            title="secuBOM: Inspect SBOM",
+            readOnlyHint=True,
+            destructiveHint=False,
+            idempotentHint=True,
+            openWorldHint=True,
+        )
+    )
     def inspect_sbom(path: str) -> dict:
-        """Analyze one CycloneDX or SPDX SBOM and return prioritized findings."""
+        """[secuBOM] Analyze one CycloneDX or SPDX SBOM and return prioritized security findings.
+
+        secuBOM inspects a single SBOM file, detects vulnerable packages via the OSV
+        database, flags license and SBOM-quality risks, and returns a release recommendation.
+        """
         result = analyze_sbom_file(path)
         payload = analysis_to_dict(result)
         payload["markdown_report"] = render_analysis_markdown(result)
         return payload
 
-    @mcp.tool()
+    @mcp.tool(
+        annotations=ToolAnnotations(
+            title="secuBOM: Compare SBOM Candidates",
+            readOnlyHint=True,
+            destructiveHint=False,
+            idempotentHint=True,
+            openWorldHint=True,
+        )
+    )
     def compare_sbom_candidates(paths: list[str]) -> dict:
-        """Compare multiple SBOM candidates and recommend the safest release option."""
+        """[secuBOM] Compare multiple SBOM candidates and recommend the safest release option.
+
+        secuBOM analyzes each SBOM candidate, ranks them by combined security risk and
+        SBOM quality, reports version differences, and recommends the safest build to ship.
+        """
         result = compare_sbom_files(paths)
         payload = comparison_to_dict(result)
         payload["markdown_report"] = render_comparison_markdown(result)
@@ -50,7 +76,7 @@ if FastMCP:
 
 
 def run_cli() -> int:
-    parser = argparse.ArgumentParser(description="SBOM security analysis and candidate comparison.")
+    parser = argparse.ArgumentParser(description="secuBOM: SBOM security analysis and candidate comparison.")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     analyze_parser = subparsers.add_parser("analyze", help="Analyze one SBOM")
